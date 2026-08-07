@@ -18,8 +18,6 @@ import { supabase } from "./supabaseClient";
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
-const SESSION_KEY = "studio-session-v1";
-
 function seedDB() {
   return {
     studio: { name: "Reformer Pilates Stüdyosu", address: "", lat: null, lng: null, radius: 150 },
@@ -132,24 +130,6 @@ async function saveDB(db) {
   } catch (e) {
     console.error("Kayıt hatası", e);
   }
-}
-async function loadSession() {
-  try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
-}
-async function saveSession(staffId) {
-  try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ staffId }));
-  } catch (e) {}
-}
-async function clearSession() {
-  try {
-    localStorage.removeItem(SESSION_KEY);
-  } catch (e) {}
 }
 
 function distanceMeters(lat1, lon1, lat2, lon2) {
@@ -856,8 +836,8 @@ function OverviewTab({ db, mutate, isAdmin, currentUser, setActiveTab }) {
             <div className="flex flex-col gap-2">
               {db.leaveRecords.filter((l) => l.staffId === currentUser.id).sort((a, b) => new Date(b.startDate) - new Date(a.startDate)).map((l) => (
                 <div key={l.id} className="flex items-center justify-between text-sm">
-                  <span>{fmtDate(l.startDate)} – {fmtDate(l.endDate)}</span>
-                  <span className="font-mono text-xs text-[#8B8168]">{l.days} gün</span>
+                  <span>{l.type === "hourly" ? `${fmtDate(l.startDate)} · Saatlik` : `${fmtDate(l.startDate)} – ${fmtDate(l.endDate)}`}</span>
+                  <span className="font-mono text-xs text-[#8B8168]">{l.type === "hourly" ? `${l.hours} saat` : `${l.days} gün`}</span>
                 </div>
               ))}
             </div>
@@ -1331,11 +1311,9 @@ function MembersTab({ db, mutate, isAdmin, currentUser }) {
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="font-display text-xl font-semibold">Üyeler</h2>
-        {isAdmin && (
-          <button onClick={() => setShowForm(true)} className="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5">
-            <Plus size={16} /> Yeni Üye
-          </button>
-        )}
+        <button onClick={() => setShowForm(true)} className="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5">
+          <Plus size={16} /> Yeni Üye
+        </button>
       </div>
 
       <div className="relative">
@@ -1352,7 +1330,7 @@ function MembersTab({ db, mutate, isAdmin, currentUser }) {
       </div>
 
       {filtered.length === 0 ? (
-        <EmptyState icon={Users} title="Üye bulunamadı" sub={filterMode !== "all" ? "Bu durumda üye yok." : (isAdmin ? "Yeni Üye butonuyla ilk üyeni ekle." : "Henüz sisteme üye eklenmemiş.")} />
+        <EmptyState icon={Users} title="Üye bulunamadı" sub={filterMode !== "all" ? "Bu durumda üye yok." : "Yeni Üye butonuyla ilk üyeni ekle."} />
       ) : (
         <div className="flex flex-col gap-2">
           {filtered.map((m) => {
@@ -1400,7 +1378,7 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
     .sort((a, b) => a.timeSlot.localeCompare(b.timeSlot));
   const scheduledMemberIds = new Set(classesForDay.flatMap((c) => c.memberIds || []));
 
-  const membersWithActivePkg = db.members.filter((m) => m.active && !scheduledMemberIds.has(m.id) && db.packages.some((p) => p.memberId === m.id && p.remainingSessions > 0));
+  const membersWithActivePkg = db.members.filter((m) => m.active && db.packages.some((p) => p.memberId === m.id && p.remainingSessions > 0));
   const filtered = membersWithActivePkg.filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
 
   const mark = (member, status) => {
@@ -1530,13 +1508,13 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
       )}
 
       <div className="flex flex-col gap-2">
-        <p className="text-sm font-semibold text-[#5B5340]">Programda Olmayan Üyeler</p>
+        <p className="text-sm font-semibold text-[#5B5340]">Üye Ara ve İşaretle</p>
         <div className="relative">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8B8168]" />
           <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Üye ara..." className="!pl-9" />
         </div>
         {filtered.length === 0 ? (
-          <EmptyState icon={CalendarCheck} title="Uygun üye yok" sub="Programda olmayan, aktif paketli üye bulunamadı." />
+          <EmptyState icon={CalendarCheck} title="Uygun üye yok" sub="Aktif paketli üye bulunamadı." />
         ) : (
           filtered.map((m) => (
             <div key={m.id} className="card-surface rounded-2xl p-3">
@@ -1947,12 +1925,15 @@ function ExpenseFormModal({ onClose, onSave }) {
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Kira");
+  const [customCategory, setCustomCategory] = useState("");
   const [date, setDate] = useState(todayISO());
+  const finalCategory = category === "Diğer" ? customCategory.trim() : category;
+  const canSave = description.trim() && amount && (category !== "Diğer" || customCategory.trim());
   return (
     <Modal
       title="Yeni Gider Ekle"
       onClose={onClose}
-      footer={<button disabled={!description.trim() || !amount} onClick={() => onSave({ description: description.trim(), amount: Number(amount), category, date })} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
+      footer={<button disabled={!canSave} onClick={() => onSave({ description: description.trim(), amount: Number(amount), category: finalCategory, date })} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
     >
       <div className="flex flex-col gap-3">
         <Field label="Açıklama"><input type="text" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Örn. Elektrik faturası" /></Field>
@@ -1962,6 +1943,11 @@ function ExpenseFormModal({ onClose, onSave }) {
             <option>Kira</option><option>Personel Maaşı</option><option>Fatura</option><option>Ekipman</option><option>Temizlik</option><option>Pazarlama</option><option>Diğer</option>
           </select>
         </Field>
+        {category === "Diğer" && (
+          <Field label="Kategori Adı">
+            <input type="text" value={customCategory} onChange={(e) => setCustomCategory(e.target.value)} placeholder="Örn. Vergi, Aidat..." />
+          </Field>
+        )}
         <Field label="Tarih"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       </div>
     </Modal>
@@ -2112,21 +2098,81 @@ function StaffFormModal({ onClose, onSave }) {
 }
 
 function LeaveFormModal({ onClose, onSave, staffName }) {
+  const [mode, setMode] = useState("daily");
   const [startDate, setStartDate] = useState(todayISO());
   const [endDate, setEndDate] = useState(todayISO());
+  const [hourDate, setHourDate] = useState(todayISO());
+  const [hours, setHours] = useState(2);
   const [note, setNote] = useState("");
-  const days = Math.max(daysBetweenInclusive(startDate, endDate), 1);
+  const dailyDays = Math.max(daysBetweenInclusive(startDate, endDate), 1);
+  const hourlyDays = Math.round((Number(hours) / 8) * 100) / 100;
+
+  const save = () => {
+    if (mode === "daily") {
+      onSave({ type: "daily", startDate, endDate, days: dailyDays, note });
+    } else {
+      onSave({ type: "hourly", startDate: hourDate, endDate: hourDate, hours: Number(hours), days: hourlyDays, note });
+    }
+  };
+
   return (
     <Modal
       title={`${staffName} · İzin Ekle`}
       onClose={onClose}
-      footer={<button onClick={() => onSave({ startDate, endDate, days, note })} className="btn-clay rounded-xl py-3 font-semibold w-full">Kaydet</button>}
+      footer={<button onClick={save} className="btn-clay rounded-xl py-3 font-semibold w-full">Kaydet</button>}
     >
       <div className="flex flex-col gap-3">
-        <Field label="Başlangıç"><input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></Field>
-        <Field label="Bitiş"><input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></Field>
-        <p className="text-xs text-[#8B8168]">Toplam <b className="font-mono">{days}</b> gün ({days * 8} saat)</p>
+        <div className="flex gap-2">
+          <button onClick={() => setMode("daily")} className="flex-1 text-xs font-semibold py-2 rounded-lg" style={{ background: mode === "daily" ? "#20291F" : "#F4F0E6", color: mode === "daily" ? "#F4F0E6" : "#5B5340" }}>Günlük İzin</button>
+          <button onClick={() => setMode("hourly")} className="flex-1 text-xs font-semibold py-2 rounded-lg" style={{ background: mode === "hourly" ? "#20291F" : "#F4F0E6", color: mode === "hourly" ? "#F4F0E6" : "#5B5340" }}>Saatlik İzin</button>
+        </div>
+
+        {mode === "daily" ? (
+          <>
+            <Field label="Başlangıç"><input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></Field>
+            <Field label="Bitiş"><input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></Field>
+            <p className="text-xs text-[#8B8168]">Toplam <b className="font-mono">{dailyDays}</b> gün ({dailyDays * 8} saat)</p>
+          </>
+        ) : (
+          <>
+            <Field label="Tarih"><input type="date" value={hourDate} onChange={(e) => setHourDate(e.target.value)} /></Field>
+            <Field label="Saat Sayısı"><input type="number" min={1} max={8} step={1} value={hours} onChange={(e) => setHours(e.target.value)} /></Field>
+            <p className="text-xs text-[#8B8168]">Yıllık izinden <b className="font-mono">{hourlyDays}</b> gün karşılığı düşülecek.</p>
+          </>
+        )}
+
         <Field label="Not (opsiyonel)"><input type="text" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
+function PinChangeModal({ staffName, onClose, onSave }) {
+  const [pin, setPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const mismatch = confirmPin.length === 4 && pin !== confirmPin;
+  return (
+    <Modal
+      title={`${staffName} · PIN Değiştir`}
+      onClose={onClose}
+      footer={
+        <button
+          disabled={pin.length !== 4 || pin !== confirmPin}
+          onClick={() => onSave(pin)}
+          className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40"
+        >
+          PIN'i Kaydet
+        </button>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <Field label="Yeni 4 Haneli PIN">
+          <input type="text" inputMode="numeric" maxLength={4} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="••••" />
+        </Field>
+        <Field label="Yeni PIN (tekrar)">
+          <input type="text" inputMode="numeric" maxLength={4} value={confirmPin} onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="••••" />
+        </Field>
+        {mismatch && <p className="text-xs text-[#B14A3A]">PIN'ler eşleşmiyor.</p>}
       </div>
     </Modal>
   );
@@ -2331,12 +2377,22 @@ function InstructorDetail({ db, mutate, staffMember, onBack, currentUser }) {
 function StaffTab({ db, mutate, currentUser }) {
   const [showForm, setShowForm] = useState(false);
   const [leaveFor, setLeaveFor] = useState(null);
+  const [pinFor, setPinFor] = useState(null);
   const [punctualityMonth, setPunctualityMonth] = useState(new Date().toISOString().slice(0, 7));
   const [selectedStaffId, setSelectedStaffId] = useState(null);
 
   const addStaff = (data) => { mutate((d) => { d.staff.push({ id: uid(), ...data, active: true }); return d; }); setShowForm(false); };
   const toggleActive = (id) => mutate((d) => { const s = d.staff.find((x) => x.id === id); if (s) s.active = !s.active; return d; });
   const updateLeaveDays = (id, val) => mutate((d) => { const s = d.staff.find((x) => x.id === id); if (s) s.annualLeaveDays = Number(val) || 0; return d; });
+  const changePin = (id, newPin) => {
+    mutate((d) => {
+      const s = d.staff.find((x) => x.id === id);
+      if (s) s.pin = newPin;
+      logActivity(d, currentUser, `PIN değiştirildi: ${s?.name || "Personel"}`);
+      return d;
+    });
+    setPinFor(null);
+  };
   const addLeave = (staffId, data) => { mutate((d) => { d.leaveRecords.push({ id: uid(), staffId, ...data }); return d; }); setLeaveFor(null); };
   const deleteLeave = (id) => mutate((d) => {
     const l = d.leaveRecords.find((x) => x.id === id);
@@ -2372,9 +2428,12 @@ function StaffTab({ db, mutate, currentUser }) {
                   <div className="flex items-center gap-2">
                     {s.role === "admin" ? <ShieldCheck size={15} className="text-[#3E6B52]" /> : <UserCheck size={15} className="text-[#2F6F8F]" />}
                     <span className={!s.active ? "line-through text-[#8B8168]" : "font-medium"}>{s.name}</span>
-                    <span className="text-xs text-[#8B8168] font-mono">PIN {s.pin}</span>
+                    <span className="text-xs text-[#8B8168] font-mono">PIN ••••</span>
                   </div>
                   <div className="flex items-center gap-2">
+                    <button onClick={() => setPinFor(s)} className="text-xs font-semibold px-2.5 py-1 rounded-lg" style={{ background: "#F5EDDA", color: "#A98330" }}>
+                      PIN Değiştir
+                    </button>
                     <button onClick={() => toggleActive(s.id)} className="text-xs font-semibold px-2.5 py-1 rounded-lg" style={{ background: s.active ? "#F7E7E2" : "#E7F0EA", color: s.active ? "#B14A3A" : "#3E6B52" }}>
                       {s.active ? "Pasifleştir" : "Aktifleştir"}
                     </button>
@@ -2411,9 +2470,9 @@ function StaffTab({ db, mutate, currentUser }) {
               const s = db.staff.find((x) => x.id === l.staffId);
               return (
                 <div key={l.id} className="flex items-center justify-between text-sm">
-                  <span>{s?.name || "Silinmiş personel"} · {fmtDate(l.startDate)} – {fmtDate(l.endDate)}</span>
+                  <span>{s?.name || "Silinmiş personel"} · {l.type === "hourly" ? `${fmtDate(l.startDate)} (Saatlik)` : `${fmtDate(l.startDate)} – ${fmtDate(l.endDate)}`}</span>
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs text-[#8B8168]">{l.days} gün</span>
+                    <span className="font-mono text-xs text-[#8B8168]">{l.type === "hourly" ? `${l.hours} saat` : `${l.days} gün`}</span>
                     <button onClick={() => deleteLeave(l.id)} className="text-[#8B8168] hover:text-[#B14A3A]"><Trash2 size={13} /></button>
                   </div>
                 </div>
@@ -2486,6 +2545,7 @@ function StaffTab({ db, mutate, currentUser }) {
 
       {showForm && <StaffFormModal onClose={() => setShowForm(false)} onSave={addStaff} />}
       {leaveFor && <LeaveFormModal staffName={leaveFor.name} onClose={() => setLeaveFor(null)} onSave={(data) => addLeave(leaveFor.id, data)} />}
+      {pinFor && <PinChangeModal staffName={pinFor.name} onClose={() => setPinFor(null)} onSave={(newPin) => changePin(pinFor.id, newPin)} />}
     </div>
   );
 }
@@ -2494,30 +2554,49 @@ function StaffTab({ db, mutate, currentUser }) {
 
 function CheckinTab({ db, mutate, currentUser }) {
   const [status, setStatus] = useState("idle");
-  const [errorMsg, setErrorMsg] = useState("");
+  const [warning, setWarning] = useState("");
   const [lastResult, setLastResult] = useState(null);
 
   const myCheckins = db.checkins.filter((c) => c.staffId === currentUser.id).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 15);
   const studio = db.studio;
   const studioSet = studio.lat != null && studio.lng != null;
 
+  const finish = (record, warn) => {
+    mutate((d) => { d.checkins.push(record); return d; });
+    setLastResult(record);
+    setWarning(warn || "");
+    setStatus("done");
+  };
+
   const doCheckin = () => {
-    if (!studioSet) { setErrorMsg("Yönetici henüz stüdyo konumunu Ayarlar bölümünden tanımlamadı."); setStatus("error"); return; }
-    if (!navigator.geolocation) { setErrorMsg("Bu tarayıcı konum servisini desteklemiyor."); setStatus("error"); return; }
     setStatus("loading");
+    setWarning("");
+    if (!navigator.geolocation) {
+      finish(
+        { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: null, lng: null, distance: null, verified: false },
+        "Bu cihaz konum servisini desteklemiyor, giriş konum doğrulanmadan kaydedildi."
+      );
+      return;
+    }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const { latitude, longitude } = pos.coords;
+        if (!studioSet) {
+          finish(
+            { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: null, verified: false },
+            "Yönetici henüz stüdyo konumunu tanımlamadı, giriş konum doğrulanmadan kaydedildi."
+          );
+          return;
+        }
         const dist = distanceMeters(latitude, longitude, studio.lat, studio.lng);
         const verified = dist !== null && dist <= studio.radius;
-        const record = { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: dist, verified };
-        mutate((d) => { d.checkins.push(record); return d; });
-        setLastResult(record);
-        setStatus("done");
+        finish({ id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: dist, verified });
       },
       (err) => {
-        setErrorMsg(err.code === 1 ? "Konum izni reddedildi. Tarayıcı ayarlarından konum iznini açman gerekiyor." : "Konum alınamadı. Tekrar deneyin.");
-        setStatus("error");
+        finish(
+          { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: null, lng: null, distance: null, verified: false },
+          err.code === 1 ? "Konum izni verilmedi, giriş konum doğrulanmadan kaydedildi." : "Konum alınamadı, giriş konum doğrulanmadan kaydedildi."
+        );
       },
       { enableHighAccuracy: true, timeout: 12000 }
     );
@@ -2539,18 +2618,15 @@ function CheckinTab({ db, mutate, currentUser }) {
           {status === "loading" ? <><Loader2 size={18} className="animate-spin" /> Konum doğrulanıyor...</> : <><MapPin size={18} /> Konumumu Doğrula ve Giriş Yap</>}
         </button>
 
-        {status === "error" && (
-          <div className="w-full bg-[#F7E7E2] text-[#B14A3A] text-sm rounded-xl p-3 flex items-start gap-2 text-left">
-            <AlertTriangle size={16} className="shrink-0 mt-0.5" /><span>{errorMsg}</span>
-          </div>
-        )}
         {status === "done" && lastResult && (
           <div className={`w-full text-sm rounded-xl p-3 flex items-start gap-2 text-left ${lastResult.verified ? "bg-[#E7F0EA] text-[#3E6B52]" : "bg-[#F5EDDA] text-[#A98330]"}`}>
             {lastResult.verified ? <CheckCircle2 size={16} className="shrink-0 mt-0.5" /> : <AlertTriangle size={16} className="shrink-0 mt-0.5" />}
             <span>
-              {lastResult.verified
-                ? `Giriş kaydedildi — stüdyo konumundan ${Math.round(lastResult.distance)} m mesafedesin.`
-                : `Giriş kaydedildi ancak stüdyodan ${Math.round(lastResult.distance)} m uzaktasın, konum doğrulanamadı.`}
+              {warning
+                ? warning
+                : lastResult.verified
+                  ? `Giriş kaydedildi — stüdyo konumundan ${Math.round(lastResult.distance)} m mesafedesin.`
+                  : `Giriş kaydedildi ancak stüdyodan ${Math.round(lastResult.distance)} m uzaktasın, konum doğrulanamadı.`}
             </span>
           </div>
         )}
@@ -2833,11 +2909,16 @@ function Sidebar({ tabs, activeTab, setActiveTab, currentUser, onLogout, studioN
 
 function BottomNav({ tabs, activeTab, setActiveTab }) {
   return (
-    <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[#FCFAF4] border-t border-[#E7DFC9] flex justify-around py-1.5 z-40 overflow-x-auto scrollbar-thin">
+    <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[#FCFAF4] border-t border-[#E7DFC9] flex justify-around py-2.5 z-40 overflow-x-auto scrollbar-thin" style={{ scrollSnapType: "x proximity" }}>
       {tabs.map((t) => (
-        <button key={t.id} onClick={() => setActiveTab(t.id)} className={`flex flex-col items-center gap-0.5 px-2 py-1.5 rounded-xl min-w-[54px] shrink-0 ${activeTab === t.id ? "text-[#20291F]" : "text-[#8B8168]"}`}>
-          <t.icon size={18} />
-          <span className="text-[9px] font-medium leading-none whitespace-nowrap">{t.label}</span>
+        <button
+          key={t.id}
+          onClick={() => setActiveTab(t.id)}
+          className={`flex flex-col items-center justify-center gap-1 px-3 rounded-xl min-w-[68px] shrink-0 ${activeTab === t.id ? "text-[#20291F] bg-[#F4F0E6]" : "text-[#8B8168]"}`}
+          style={{ minHeight: 58, scrollSnapAlign: "start" }}
+        >
+          <t.icon size={22} />
+          <span className="text-[10px] font-semibold leading-none whitespace-nowrap">{t.label}</span>
         </button>
       ))}
     </div>
@@ -2867,11 +2948,8 @@ export default function App() {
       }
       d = migrateDB(d);
       setDb(d);
-      const session = await loadSession();
-      if (session) {
-        const s = d.staff.find((x) => x.id === session.staffId && x.active);
-        if (s) setCurrentUser(s);
-      }
+      // Bilinçli olarak oturum hatırlanmıyor: paylaşılan/ortak cihazlarda yanlış
+      // kişi adına işlem yapılmasın diye her sayfa açılışında PIN ekranı gelir.
       setLoading(false);
     })();
   }, []);
@@ -2888,7 +2966,7 @@ export default function App() {
           const cu = currentUserRef.current;
           if (cu) {
             const stillActive = migrated.staff.find((s) => s.id === cu.id && s.active);
-            if (!stillActive) { setCurrentUser(null); clearSession(); }
+            if (!stillActive) { setCurrentUser(null); }
           }
         }
       })
@@ -2925,8 +3003,8 @@ export default function App() {
       .finally(() => setSyncing(false));
   }, []);
 
-  const handleLogin = (staff) => { setCurrentUser(staff); saveSession(staff.id); setActiveTab("overview"); };
-  const handleLogout = () => { setCurrentUser(null); clearSession(); };
+  const handleLogin = (staff) => { setCurrentUser(staff); setActiveTab("overview"); };
+  const handleLogout = () => { setCurrentUser(null); };
 
   if (dbError) {
     return (
@@ -2970,7 +3048,7 @@ export default function App() {
         <button onClick={handleLogout} className="w-9 h-9 rounded-full flex items-center justify-center bg-[#F4F0E6] text-[#B14A3A]"><LogOut size={16} /></button>
       </div>
 
-      <div className="md:ml-60 p-4 md:p-8 pb-24 md:pb-8 max-w-4xl">
+      <div className="md:ml-60 p-4 md:p-8 pb-28 md:pb-8 max-w-4xl">
         {visibleTab === "overview" && <OverviewTab db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} setActiveTab={setActiveTab} />}
         {visibleTab === "members" && <MembersTab db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} />}
         {visibleTab === "packages" && isAdmin && <PackagesTab db={db} />}
