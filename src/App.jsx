@@ -291,6 +291,8 @@ const SOLID_FOR_PALE = {
 
 function StatCard({ icon: Icon, label, value, sub, accent }) {
   const solid = SOLID_FOR_PALE[accent] || "#5B5340";
+  const valueStr = String(value);
+  const sizeClass = valueStr.length > 10 ? "text-base" : valueStr.length > 7 ? "text-lg" : "text-2xl";
   return (
     <div className="card-surface rounded-2xl p-4 flex flex-col gap-2 min-w-0" style={{ borderLeft: `3px solid ${solid}` }}>
       <div className="flex items-center justify-between">
@@ -299,7 +301,7 @@ function StatCard({ icon: Icon, label, value, sub, accent }) {
           <Icon size={16} color="#FFFEFB" />
         </div>
       </div>
-      <div className="font-display text-2xl font-semibold truncate">{value}</div>
+      <div className={`font-display font-semibold truncate ${sizeClass}`} title={valueStr}>{value}</div>
       {sub ? <div className="text-xs text-[#8B8168]">{sub}</div> : null}
     </div>
   );
@@ -3045,7 +3047,7 @@ export default function App() {
           <p className="font-display text-base font-semibold leading-tight">{db.studio.name}</p>
           <p className="text-xs text-[#8B8168]">{currentUser.name}</p>
         </div>
-        <button onClick={handleLogout} className="w-9 h-9 rounded-full flex items-center justify-center bg-[#F4F0E6] text-[#B14A3A]"><LogOut size={16} /></button>
+        <button onClick={handleLogout} aria-label="Çıkış Yap" className="w-9 h-9 rounded-full flex items-center justify-center bg-[#F4F0E6] text-[#B14A3A]"><LogOut size={16} /></button>
       </div>
 
       <div className="md:ml-60 p-4 md:p-8 pb-28 md:pb-8 max-w-4xl">
