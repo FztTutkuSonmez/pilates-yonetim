@@ -12,6 +12,8 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from "recharts";
 import * as XLSX from "xlsx";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import { supabase } from "./supabaseClient";
 
 /* ============================= YARDIMCI FONKSİYONLAR ============================= */
@@ -56,6 +58,7 @@ function migrateDB(d) {
     if (!c.roomId) c.roomId = "oda1";
     if (!c.serviceType) c.serviceType = "Reformer Pilates";
     if (!c.timeSlot) c.timeSlot = c.startTime && c.endTime ? `${c.startTime}-${c.endTime}` : TIME_SLOTS[0];
+    if (!c.weekStart) c.weekStart = getMonday(todayISO());
   });
   if (!d.leaveRecords) d.leaveRecords = [];
   if (!d.notes) d.notes = [];
@@ -76,6 +79,7 @@ function migrateDB(d) {
       p.payments = legacyPrice > 0 ? [{ id: uid(), amount: legacyPrice, method: p.paymentMethod || "Nakit", date: p.purchaseDate }] : [];
     }
     if (!p.extras) p.extras = [];
+    if (!p.serviceType) p.serviceType = "Reformer Pilates";
     else if (p.extras.length && typeof p.extras[0] === "object") {
       p.extras = p.extras.map((ex) => `${ex.name}${ex.duration ? ` (${ex.duration})` : ""}`);
     }
@@ -171,6 +175,12 @@ function addDays(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   d.setDate(d.getDate() + n);
   return d.toISOString().slice(0, 10);
+}
+function getMonday(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const jsDay = d.getDay();
+  const ourIndex = (jsDay + 6) % 7; // 0=Pazartesi
+  return addDays(dateStr, -ourIndex);
 }
 
 const STATUS_META = {
@@ -766,12 +776,14 @@ function OverviewTab({ db, mutate, isAdmin, currentUser, setActiveTab }) {
       {!isAdmin && (
         <div className="card-surface rounded-2xl p-4 flex items-center justify-between">
           <div>
-            <p className="text-sm font-semibold">Bugünkü giriş durumun</p>
+            <p className="text-sm font-semibold">Bugünkü giriş/çıkış durumun</p>
             <p className="text-xs text-[#8B8168] mt-0.5">
-              {myCheckinToday ? `${fmtDateTime(myCheckinToday.timestamp)} · ${myCheckinToday.verified ? "Konum doğrulandı" : "Konum doğrulanamadı"}` : "Henüz giriş yapmadın"}
+              {myCheckinToday
+                ? `${myCheckinToday.type === "out" ? "Çıkış" : "Giriş"} · ${fmtDateTime(myCheckinToday.timestamp)} · ${myCheckinToday.verified ? "Konum doğrulandı" : "Konum doğrulanamadı"}`
+                : "Henüz kayıt yok"}
             </p>
           </div>
-          <button onClick={() => setActiveTab("checkin")} className="btn-clay px-4 py-2 rounded-xl text-sm font-semibold shrink-0">Giriş Yap</button>
+          <button onClick={() => setActiveTab("checkin")} className="btn-clay px-4 py-2 rounded-xl text-sm font-semibold shrink-0">Giriş / Çıkış</button>
         </div>
       )}
 
@@ -908,6 +920,7 @@ const EXTRA_SUGGESTIONS = ["Diyet Danışmanlığı", "Vücut Analizi", "Beslenm
 
 function PackageFormModal({ onClose, onSave }) {
   const [name, setName] = useState("8 Seans Paketi");
+  const [serviceType, setServiceType] = useState("Reformer Pilates");
   const [totalSessions, setTotalSessions] = useState(8);
   const [totalPrice, setTotalPrice] = useState("");
   const [paidNow, setPaidNow] = useState("");
@@ -930,7 +943,7 @@ function PackageFormModal({ onClose, onSave }) {
 
   const save = () => {
     const payments = paid > 0 ? [{ id: uid(), amount: paid, method: paymentMethod, date: purchaseDate }] : [];
-    onSave({ name: name.trim(), totalSessions: Number(totalSessions), remainingSessions: Number(totalSessions), totalPrice: total, payments, purchaseDate, extras });
+    onSave({ name: name.trim(), serviceType, totalSessions: Number(totalSessions), remainingSessions: Number(totalSessions), totalPrice: total, payments, purchaseDate, extras });
   };
 
   return (
@@ -948,6 +961,11 @@ function PackageFormModal({ onClose, onSave }) {
       }
     >
       <div className="flex flex-col gap-3">
+        <Field label="Paket Türü">
+          <select value={serviceType} onChange={(e) => { setServiceType(e.target.value); setName(e.target.value === "Masaj" ? "5 Masaj Seansı" : "8 Seans Paketi"); }}>
+            {SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
         <Field label="Paket Adı (kampanya için serbest yazabilirsin)">
           <input list="package-name-suggestions" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Örn. 8 Seans Reformer + 1 Aylık Diyet" />
           <datalist id="package-name-suggestions">{PACKAGE_NAME_SUGGESTIONS.map((p) => <option key={p} value={p} />)}</datalist>
@@ -1065,7 +1083,7 @@ function FreezeFormModal({ onClose, onSave }) {
   );
 }
 
-function MemberDetail({ db, member, mutate, isAdmin, onBack }) {
+function MemberDetail({ db, member, mutate, isAdmin, onBack, currentUser }) {
   const [showPkgForm, setShowPkgForm] = useState(false);
   const [showEditForm, setShowEditForm] = useState(false);
   const [showFreezeForm, setShowFreezeForm] = useState(false);
@@ -1075,6 +1093,22 @@ function MemberDetail({ db, member, mutate, isAdmin, onBack }) {
 
   const counts = attendance.reduce((acc, a) => { acc[a.status] = (acc[a.status] || 0) + 1; return acc; }, {});
   const isFrozen = member.freeze && todayISO() >= member.freeze.startDate && todayISO() <= member.freeze.endDate;
+
+  const deleteMemberCompletely = () => {
+    if (!window.confirm(`${member.name} adlı üyeyi ve TÜM paket/ödeme/yoklama kayıtlarını kalıcı olarak silmek istediğine emin misin? Bu işlem geri alınamaz.`)) return;
+    mutate((d) => {
+      d.members = d.members.filter((m) => m.id !== member.id);
+      d.packages = d.packages.filter((p) => p.memberId !== member.id);
+      d.attendance = d.attendance.filter((a) => a.memberId !== member.id);
+      d.classes.forEach((c) => {
+        c.memberIds = (c.memberIds || []).filter((id) => id !== member.id);
+        c.waitlistIds = (c.waitlistIds || []).filter((id) => id !== member.id);
+      });
+      logActivity(d, currentUser, `Üye ve tüm kayıtları silindi: ${member.name}`);
+      return d;
+    });
+    onBack();
+  };
 
   const addPackage = (pkg) => {
     mutate((d) => {
@@ -1149,12 +1183,10 @@ function MemberDetail({ db, member, mutate, isAdmin, onBack }) {
               {member.createdAt && <span>Üyelik başlangıcı: {fmtDate(member.createdAt)}</span>}
             </div>
           </div>
-          {isAdmin && (
-            <div className="flex flex-col gap-2 items-end shrink-0">
-              <button onClick={() => setShowPkgForm(true)} className="btn-clay px-3 py-2 rounded-xl text-sm font-semibold flex items-center gap-1"><Plus size={15} /> Paket</button>
-              <button onClick={() => setShowEditForm(true)} className="text-xs text-[#8B8168] flex items-center gap-1 hover:text-[#20291F]"><Edit2 size={12} /> Düzenle</button>
-            </div>
-          )}
+          <div className="flex flex-col gap-2 items-end shrink-0">
+            <button onClick={() => setShowPkgForm(true)} className="btn-clay px-3 py-2 rounded-xl text-sm font-semibold flex items-center gap-1"><Plus size={15} /> Paket</button>
+            {isAdmin && <button onClick={() => setShowEditForm(true)} className="text-xs text-[#8B8168] flex items-center gap-1 hover:text-[#20291F]"><Edit2 size={12} /> Düzenle</button>}
+          </div>
         </div>
         {member.notes && <p className="text-sm text-[#5B5340] mt-3 bg-[#F4F0E6] rounded-xl p-3">{member.notes}</p>}
 
@@ -1175,6 +1207,10 @@ function MemberDetail({ db, member, mutate, isAdmin, onBack }) {
               ) : (
                 <button onClick={toggleActive} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: "#E7F0EA", color: "#3E6B52" }}>Aktife Al</button>
               )}
+            </div>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-1.5 text-sm text-[#5B5340]"><Trash2 size={15} /> Üyeyi ve Tüm Kayıtlarını Sil</div>
+              <button onClick={deleteMemberCompletely} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: "#F7E7E2", color: "#B14A3A" }}>Kalıcı Olarak Sil</button>
             </div>
           </div>
         )}
@@ -1205,9 +1241,7 @@ function MemberDetail({ db, member, mutate, isAdmin, onBack }) {
                 <div key={p.id} className="flex flex-col gap-2 pb-3 border-b border-[#E7DFC9] last:border-0 last:pb-0">
                   <div className="flex items-center justify-between text-sm flex-wrap gap-1">
                     <span className="font-medium">{p.name}</span>
-                    {isAdmin && (
-                      debt > 0 ? <Badge color="#B14A3A" bg="#F7E7E2">Borç: {fmtMoney(debt)}</Badge> : <Badge color="#3E6B52" bg="#E7F0EA">Ödendi</Badge>
-                    )}
+                    {debt > 0 ? <Badge color="#B14A3A" bg="#F7E7E2">Borç: {fmtMoney(debt)}</Badge> : <Badge color="#3E6B52" bg="#E7F0EA">Ödendi</Badge>}
                   </div>
                   <ProgressRail used={p.totalSessions - p.remainingSessions} total={p.totalSessions} />
                   <span className="text-xs text-[#8B8168]">Satın alma: {fmtDate(p.purchaseDate)}</span>
@@ -1220,15 +1254,13 @@ function MemberDetail({ db, member, mutate, isAdmin, onBack }) {
                       ))}
                     </div>
                   )}
-                  {isAdmin && (
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <span className="font-mono text-xs text-[#8B8168]">Toplam {fmtMoney(p.totalPrice)} · Ödenen {fmtMoney(paid)}</span>
-                      {debt > 0 && (
-                        <button onClick={() => setPayingPkg(p)} className="btn-teal text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1"><Plus size={12} /> Ödeme Ekle</button>
-                      )}
-                    </div>
-                  )}
-                  {isAdmin && (p.payments || []).length > 0 && (
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <span className="font-mono text-xs text-[#8B8168]">Toplam {fmtMoney(p.totalPrice)} · Ödenen {fmtMoney(paid)}</span>
+                    {debt > 0 && (
+                      <button onClick={() => setPayingPkg(p)} className="btn-teal text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1"><Plus size={12} /> Ödeme Ekle</button>
+                    )}
+                  </div>
+                  {(p.payments || []).length > 0 && (
                     <div className="flex flex-col gap-1 mt-1">
                       {p.payments.map((pay) => (
                         <div key={pay.id} className="flex items-center justify-between text-xs text-[#8B8168]">
@@ -1290,7 +1322,7 @@ function MembersTab({ db, mutate, isAdmin, currentUser }) {
   const selected = db.members.find((m) => m.id === selectedId);
 
   if (selected) {
-    return <MemberDetail db={db} member={selected} mutate={mutate} isAdmin={isAdmin} onBack={() => setSelectedId(null)} />;
+    return <MemberDetail db={db} member={selected} mutate={mutate} isAdmin={isAdmin} onBack={() => setSelectedId(null)} currentUser={currentUser} />;
   }
 
   const saveMember = (data) => {
@@ -1375,16 +1407,18 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
   const dayRecords = db.attendance.filter((a) => a.date === date);
   const jsDay = new Date(date + "T00:00:00").getDay();
   const ourIndex = (jsDay + 6) % 7;
+  const dateWeekStart = getMonday(date);
   const classesForDay = db.classes
-    .filter((c) => c.dayOfWeek === ourIndex && (isAdmin || c.instructorId === currentUser.id))
+    .filter((c) => c.dayOfWeek === ourIndex && c.weekStart === dateWeekStart && (isAdmin || c.instructorId === currentUser.id))
     .sort((a, b) => a.timeSlot.localeCompare(b.timeSlot));
   const scheduledMemberIds = new Set(classesForDay.flatMap((c) => c.memberIds || []));
 
   const membersWithActivePkg = db.members.filter((m) => m.active && db.packages.some((p) => p.memberId === m.id && p.remainingSessions > 0));
   const filtered = membersWithActivePkg.filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
 
-  const mark = (member, status) => {
-    const pkg = db.packages.filter((p) => p.memberId === member.id && p.remainingSessions > 0).sort((a, b) => new Date(a.purchaseDate) - new Date(b.purchaseDate))[0];
+  const mark = (member, status, serviceType) => {
+    const pkgs = db.packages.filter((p) => p.memberId === member.id && p.remainingSessions > 0).sort((a, b) => new Date(a.purchaseDate) - new Date(b.purchaseDate));
+    const pkg = (serviceType && pkgs.find((p) => (p.serviceType || "Reformer Pilates") === serviceType)) || pkgs[0];
     if (!pkg) return;
     mutate((d) => {
       if (status === "makeup") {
@@ -1430,9 +1464,10 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
     });
   };
 
-  const MarkRow = ({ m }) => {
+  const MarkRow = ({ m, serviceType }) => {
     const already = dayRecords.find((r) => r.memberId === m.id);
-    const hasActivePkg = db.packages.some((p) => p.memberId === m.id && p.remainingSessions > 0);
+    const relevantPkgs = db.packages.filter((p) => p.memberId === m.id && p.remainingSessions > 0);
+    const hasActivePkg = serviceType ? relevantPkgs.some((p) => (p.serviceType || "Reformer Pilates") === serviceType) : relevantPkgs.length > 0;
     return (
       <div className="flex items-center justify-between gap-2 flex-wrap py-1.5">
         <span className="font-medium text-sm">{m.name}</span>
@@ -1442,12 +1477,12 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
             <button onClick={() => undo(already)} className="text-[#8B8168] hover:text-[#B14A3A]"><Trash2 size={14} /></button>
           </div>
         ) : !hasActivePkg ? (
-          <Badge color="#B14A3A" bg="#F7E7E2">Aktif paketi yok</Badge>
+          <Badge color="#B14A3A" bg="#F7E7E2">{serviceType ? `Aktif ${serviceType} paketi yok` : "Aktif paketi yok"}</Badge>
         ) : (
           <div className="flex gap-1.5 flex-wrap">
-            <button onClick={() => mark(m, "attended")} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: STATUS_META.attended.bg, color: STATUS_META.attended.color }}>Geldi</button>
-            <button onClick={() => mark(m, "burned")} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: STATUS_META.burned.bg, color: STATUS_META.burned.color }}>Gelmedi</button>
-            <button onClick={() => mark(m, "makeup")} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: STATUS_META.makeup.bg, color: STATUS_META.makeup.color }}>Telafi (sağlık/mazaret)</button>
+            <button onClick={() => mark(m, "attended", serviceType)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: STATUS_META.attended.bg, color: STATUS_META.attended.color }}>Geldi</button>
+            <button onClick={() => mark(m, "burned", serviceType)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: STATUS_META.burned.bg, color: STATUS_META.burned.color }}>Gelmedi</button>
+            <button onClick={() => mark(m, "makeup", serviceType)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background: STATUS_META.makeup.bg, color: STATUS_META.makeup.color }}>Telafi (sağlık/mazaret)</button>
           </div>
         )}
       </div>
@@ -1494,14 +1529,14 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
           return (
             <div key={c.id} className="card-surface rounded-2xl p-4">
               <div className="flex items-center justify-between mb-2 flex-wrap gap-1">
-                <p className="text-sm font-semibold">{c.title}</p>
+                <p className="text-sm font-semibold flex items-center gap-1.5">{c.title} <Badge color={c.serviceType === "Masaj" ? "#A98330" : "#2F6F8F"} bg={c.serviceType === "Masaj" ? "#F5EDDA" : "#E4EEF2"}>{c.serviceType}</Badge></p>
                 <span className="text-xs text-[#8B8168] font-mono">{c.timeSlot}</span>
               </div>
               {roster.length === 0 ? (
                 <p className="text-xs text-[#8B8168]">Bu derste kayıtlı üye yok. Ders Programı sekmesinden üye ekleyebilirsin.</p>
               ) : (
                 <div className="flex flex-col divide-y divide-[#EFE8D5]">
-                  {roster.map((m) => <MarkRow key={m.id} m={m} />)}
+                  {roster.map((m) => <MarkRow key={m.id} m={m} serviceType={c.serviceType} />)}
                 </div>
               )}
             </div>
@@ -1529,16 +1564,80 @@ function AttendanceTab({ db, mutate, currentUser, isAdmin }) {
   );
 }
 
+/* ============================= TELAFİLER ============================= */
+
+function MakeupsTab({ db, mutate, isAdmin, currentUser }) {
+  const myMakeups = db.attendance.filter((a) => a.status === "makeup" && (isAdmin || a.instructorId === currentUser.id));
+  const groups = {};
+  myMakeups.forEach((a) => {
+    const key = a.linkGroup || a.id;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(a);
+  });
+  const today = todayISO();
+  const list = Object.values(groups).map((recs) => {
+    const sorted = [...recs].sort((a, b) => new Date(a.date) - new Date(b.date));
+    return { original: sorted[0], target: sorted[1] || sorted[0] };
+  }).sort((a, b) => new Date(b.original.date) - new Date(a.original.date));
+
+  const upcoming = list.filter((g) => g.target.date >= today);
+  const past = list.filter((g) => g.target.date < today);
+
+  const Row = ({ g }) => {
+    const member = db.members.find((m) => m.id === g.original.memberId);
+    const pkg = db.packages.find((p) => p.id === g.original.packageId);
+    return (
+      <div className="card-surface rounded-2xl p-3 flex items-center justify-between gap-2 flex-wrap">
+        <div>
+          <p className="text-sm font-medium">{member?.name || "Silinmiş üye"}</p>
+          <p className="text-xs text-[#8B8168]">
+            Devamsızlık: {fmtDate(g.original.date)} → Telafi: {fmtDate(g.target.date)}
+            {pkg?.serviceType ? ` · ${pkg.serviceType}` : ""}
+          </p>
+        </div>
+        <Badge color={g.target.date >= today ? "#2F6F8F" : "#8B8168"} bg={g.target.date >= today ? "#E4EEF2" : "#EFE8D5"}>
+          {g.target.date >= today ? "Yaklaşan" : "Geçmiş"}
+        </Badge>
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <h2 className="font-display text-xl font-semibold">Telafiler</h2>
+      <p className="text-xs text-[#8B8168]">Sağlık/mazaret nedeniyle telafi hakkı tanınan tüm devamsızlıklar ve planlanan telafi tarihleri.</p>
+
+      <div className="flex flex-col gap-2">
+        <p className="text-sm font-semibold text-[#5B5340]">Yaklaşan Telafiler ({upcoming.length})</p>
+        {upcoming.length === 0 ? (
+          <EmptyState icon={RefreshCcw} title="Yaklaşan telafi yok" />
+        ) : (
+          upcoming.map((g) => <Row key={g.original.id} g={g} />)
+        )}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <p className="text-sm font-semibold text-[#5B5340]">Geçmiş Telafiler ({past.length})</p>
+        {past.length === 0 ? (
+          <p className="text-sm text-[#8B8168]">Henüz geçmiş telafi yok.</p>
+        ) : (
+          past.map((g) => <Row key={g.original.id} g={g} />)
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ============================= DERS PROGRAMI ============================= */
 
-function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot, isAdmin, currentUser }) {
-  const [title, setTitle] = useState("Reformer Grup Dersi");
-  const [serviceType, setServiceType] = useState("Reformer Pilates");
-  const [roomId, setRoomId] = useState(ROOMS[0].id);
-  const [dayOfWeek, setDayOfWeek] = useState(initialDay != null ? initialDay : 0);
-  const [timeSlot, setTimeSlot] = useState(initialSlot || TIME_SLOTS[0]);
-  const [instructorId, setInstructorId] = useState(isAdmin ? (instructors[0]?.id || "") : currentUser.id);
-  const [capacity, setCapacity] = useState(5);
+function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot, weekStart, isAdmin, currentUser, initial }) {
+  const [title, setTitle] = useState(initial?.title || "Reformer Grup Dersi");
+  const [serviceType, setServiceType] = useState(initial?.serviceType || "Reformer Pilates");
+  const [roomId, setRoomId] = useState(initial?.roomId || ROOMS[0].id);
+  const [dayOfWeek, setDayOfWeek] = useState(initial ? initial.dayOfWeek : (initialDay != null ? initialDay : 0));
+  const [timeSlot, setTimeSlot] = useState(initial?.timeSlot || initialSlot || TIME_SLOTS[0]);
+  const [instructorId, setInstructorId] = useState(initial ? initial.instructorId : (isAdmin ? (instructors[0]?.id || "") : currentUser.id));
+  const [capacity, setCapacity] = useState(initial?.capacity || 5);
 
   const room = ROOMS.find((r) => r.id === roomId);
 
@@ -1548,11 +1647,15 @@ function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot,
     if (r) setCapacity(r.capacity);
   };
 
+  const save = () => {
+    onSave({ title: title.trim(), serviceType, roomId, dayOfWeek, timeSlot, instructorId, capacity: Number(capacity), weekStart: initial?.weekStart || weekStart });
+  };
+
   return (
     <Modal
-      title="Yeni Ders Ekle"
+      title={initial ? "Dersi Düzenle" : "Yeni Ders Ekle"}
       onClose={onClose}
-      footer={<button disabled={!title.trim() || !instructorId} onClick={() => onSave({ title: title.trim(), serviceType, roomId, dayOfWeek, timeSlot, instructorId, capacity: Number(capacity) })} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
+      footer={<button disabled={!title.trim() || !instructorId} onClick={save} className="btn-primary rounded-xl py-3 font-semibold w-full disabled:opacity-40">Kaydet</button>}
     >
       <div className="flex flex-col gap-3">
         <Field label="Ders Adı"><input type="text" value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
@@ -1599,6 +1702,7 @@ function ClassFormModal({ onClose, onSave, instructors, initialDay, initialSlot,
 function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
   const [query, setQuery] = useState("");
   const [movingMemberId, setMovingMemberId] = useState(null);
+  const [showEdit, setShowEdit] = useState(false);
   const instructor = db.staff.find((s) => s.id === cls.instructorId);
   const roster = (cls.memberIds || []).map((id) => db.members.find((m) => m.id === id)).filter(Boolean);
   const waitlist = (cls.waitlistIds || []).map((id) => db.members.find((m) => m.id === id)).filter(Boolean);
@@ -1606,7 +1710,9 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
   const isOwnClass = cls.instructorId === currentUser.id;
   const canManageRoster = isAdmin || isOwnClass;
 
-  const candidates = db.members.filter((m) => !cls.memberIds.includes(m.id) && !cls.waitlistIds.includes(m.id) && m.name.toLowerCase().includes(query.toLowerCase()));
+  const sameDayOtherClasses = db.classes.filter((c) => c.id !== cls.id && c.dayOfWeek === cls.dayOfWeek);
+  const sameDayBusyIds = new Set(sameDayOtherClasses.flatMap((c) => [...(c.memberIds || []), ...(c.waitlistIds || [])]));
+  const candidates = db.members.filter((m) => !cls.memberIds.includes(m.id) && !cls.waitlistIds.includes(m.id) && !sameDayBusyIds.has(m.id) && memberStatus(m, todayISO()) !== "frozen" && m.name.toLowerCase().includes(query.toLowerCase()));
   const otherClasses = db.classes.filter((c) => c.id !== cls.id);
 
   const enroll = (memberId) => {
@@ -1656,23 +1762,38 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
     setMovingMemberId(null);
   };
   const deleteClass = () => { mutate((d) => { d.classes = d.classes.filter((c) => c.id !== cls.id); logActivity(d, currentUser, `Ders silindi: "${cls.title}" (${WEEKDAYS[cls.dayOfWeek]} ${cls.timeSlot})`); return d; }); onClose(); };
+  const editClass = (data) => {
+    mutate((d) => {
+      const c = d.classes.find((x) => x.id === cls.id);
+      if (c) Object.assign(c, data);
+      logActivity(d, currentUser, `Ders düzenlendi: "${data.title}"`);
+      return d;
+    });
+    setShowEdit(false);
+  };
 
   return (
+    <>
     <Modal
       title={cls.title}
       onClose={onClose}
       footer={
-        isAdmin ? (
-          <button onClick={deleteClass} className="rounded-xl py-3 font-semibold w-full" style={{ background: "#F7E7E2", color: "#B14A3A" }}>Dersi Sil</button>
-        ) : isOwnClass ? (
-          <button
-            onClick={() => requestDeletion(mutate, currentUser, "classDelete", { classId: cls.id }, `"${cls.title}" (${WEEKDAYS[cls.dayOfWeek]} ${cls.timeSlot}) dersinin silinmesi`)}
-            className="rounded-xl py-3 font-semibold w-full"
-            style={{ background: "#F5EDDA", color: "#A98330" }}
-          >
-            Silme Talebi Gönder
-          </button>
-        ) : null
+        <div className="flex flex-col gap-2">
+          {canManageRoster && (
+            <button onClick={() => setShowEdit(true)} className="rounded-xl py-3 font-semibold w-full" style={{ background: "#E4EEF2", color: "#2F6F8F" }}>Dersi Düzenle</button>
+          )}
+          {isAdmin ? (
+            <button onClick={deleteClass} className="rounded-xl py-3 font-semibold w-full" style={{ background: "#F7E7E2", color: "#B14A3A" }}>Dersi Sil</button>
+          ) : isOwnClass ? (
+            <button
+              onClick={() => requestDeletion(mutate, currentUser, "classDelete", { classId: cls.id }, `"${cls.title}" (${WEEKDAYS[cls.dayOfWeek]} ${cls.timeSlot}) dersinin silinmesi`)}
+              className="rounded-xl py-3 font-semibold w-full"
+              style={{ background: "#F5EDDA", color: "#A98330" }}
+            >
+              Silme Talebi Gönder
+            </button>
+          ) : null}
+        </div>
       }
     >
       <div className="flex flex-col gap-3">
@@ -1748,65 +1869,26 @@ function ClassDetailModal({ cls, db, mutate, isAdmin, currentUser, onClose }) {
         )}
       </div>
     </Modal>
+    {showEdit && (
+      <ClassFormModal
+        onClose={() => setShowEdit(false)}
+        onSave={editClass}
+        instructors={db.staff.filter((s) => s.active && (s.role === "instructor" || s.role === "admin"))}
+        isAdmin={isAdmin}
+        currentUser={currentUser}
+        initial={cls}
+      />
+    )}
+    </>
   );
 }
 
-function ScheduleTab({ db, mutate, isAdmin, currentUser }) {
-  const [showForm, setShowForm] = useState(false);
-  const [prefill, setPrefill] = useState(null);
-  const [activeClassId, setActiveClassId] = useState(null);
-  const instructors = db.staff.filter((s) => s.active && (s.role === "instructor" || s.role === "admin"));
-  const [filterIds, setFilterIds] = useState(() => new Set(isAdmin ? instructors.map((i) => i.id) : [currentUser.id]));
-
-  const toggleFilter = (id) => {
-    setFilterIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      if (next.size === 0) return new Set(instructors.map((i) => i.id));
-      return next;
-    });
-  };
-  const selectAll = () => setFilterIds(new Set(instructors.map((i) => i.id)));
-  const allSelected = filterIds.size === instructors.length;
-
-  const visibleClasses = db.classes.filter((c) => filterIds.has(c.instructorId));
-  const activeClass = db.classes.find((c) => c.id === activeClassId);
-
-  const addClass = (data) => { mutate((d) => { d.classes.push({ id: uid(), ...data, memberIds: [], waitlistIds: [] }); return d; }); setShowForm(false); setPrefill(null); };
-  const openQuickAdd = (dayIdx, slot) => { setPrefill({ day: dayIdx, slot }); setShowForm(true); };
-
+function WeekGrid({ title, weekStart, isCurrentOrFuture, visibleClasses, db, isAdmin, currentUser, onOpenClass, onQuickAdd }) {
+  const weekClasses = visibleClasses.filter((c) => c.weekStart === weekStart);
+  const weekEnd = addDays(weekStart, 5);
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="font-display text-xl font-semibold">Ders Programı</h2>
-        <button onClick={() => { setPrefill(null); setShowForm(true); }} className="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5"><Plus size={16} /> Yeni Ders</button>
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <button onClick={selectAll} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: allSelected ? "#20291F" : "#F4F0E6", color: allSelected ? "#F4F0E6" : "#5B5340" }}>Tüm Hocalar</button>
-        {instructors.map((ins) => {
-          const active = filterIds.has(ins.id);
-          return (
-            <button key={ins.id} onClick={() => toggleFilter(ins.id)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: active ? "#2F6F8F" : "#F4F0E6", color: active ? "#FCFAF4" : "#5B5340" }}>
-              {ins.name}
-            </button>
-          );
-        })}
-      </div>
-
-      {visibleClasses.length === 0 && (
-        <p className="text-xs text-[#8B8168]">Boş bir hücreye dokunarak programı oluşturmaya başla.</p>
-      )}
-
-      <div className="flex flex-wrap items-center gap-3 -mt-1">
-        {ROOMS.map((r) => (
-          <span key={r.id} className="flex items-center gap-1.5 text-xs text-[#5B5340]">
-            <span className="w-2.5 h-2.5 rounded-full" style={{ background: ROOM_COLORS[r.id].solid }} />
-            {r.name}
-          </span>
-        ))}
-      </div>
-
+    <div className="flex flex-col gap-2">
+      <p className="text-sm font-semibold text-[#5B5340]">{title} <span className="font-mono text-xs text-[#8B8168]">({fmtDate(weekStart)} – {fmtDate(weekEnd)})</span></p>
       <div className="card-surface rounded-2xl overflow-hidden">
         <div className="overflow-x-auto scrollbar-thin">
           <table className="border-collapse text-sm" style={{ minWidth: 780 }}>
@@ -1823,7 +1905,7 @@ function ScheduleTab({ db, mutate, isAdmin, currentUser }) {
                 <tr key={slot} className="zebra-row">
                   <td className="sticky left-0 z-10 p-2 text-xs font-mono font-semibold text-[#5B5340] border-r-2 border-b border-[#E7DFC9] whitespace-nowrap align-top" style={{ background: "inherit" }}>{slot}</td>
                   {SCHEDULE_DAYS.map((dayIdx) => {
-                    const cellClasses = visibleClasses.filter((c) => c.dayOfWeek === dayIdx && c.timeSlot === slot);
+                    const cellClasses = weekClasses.filter((c) => c.dayOfWeek === dayIdx && c.timeSlot === slot);
                     return (
                       <td key={dayIdx} className="p-1 border-b border-r border-[#EFE8D5] align-top last:border-r-0">
                         <div className="flex flex-col gap-1">
@@ -1835,7 +1917,7 @@ function ScheduleTab({ db, mutate, isAdmin, currentUser }) {
                             return (
                               <button
                                 key={c.id}
-                                onClick={() => setActiveClassId(c.id)}
+                                onClick={() => onOpenClass(c.id)}
                                 className="text-left rounded-lg p-1.5 w-full"
                                 style={{ background: colors.bg, borderLeft: `3px solid ${colors.solid}` }}
                               >
@@ -1845,7 +1927,9 @@ function ScheduleTab({ db, mutate, isAdmin, currentUser }) {
                               </button>
                             );
                           })}
-                          <button onClick={() => openQuickAdd(dayIdx, slot)} className="text-[#B9AF8F] hover:text-[#5B5340] hover:bg-[#F4F0E6] text-xs w-full text-center py-1.5 rounded-lg">+</button>
+                          {isCurrentOrFuture && (
+                            <button onClick={() => onQuickAdd(dayIdx, slot)} className="text-[#B9AF8F] hover:text-[#5B5340] hover:bg-[#F4F0E6] text-xs w-full text-center py-1.5 rounded-lg">+</button>
+                          )}
                         </div>
                       </td>
                     );
@@ -1856,8 +1940,131 @@ function ScheduleTab({ db, mutate, isAdmin, currentUser }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {showForm && <ClassFormModal onClose={() => { setShowForm(false); setPrefill(null); }} onSave={addClass} instructors={instructors} initialDay={prefill?.day} initialSlot={prefill?.slot} isAdmin={isAdmin} currentUser={currentUser} />}
+function ScheduleTab({ db, mutate, isAdmin, currentUser }) {
+  const [showForm, setShowForm] = useState(false);
+  const [prefill, setPrefill] = useState(null);
+  const [activeClassId, setActiveClassId] = useState(null);
+  const [showArchive, setShowArchive] = useState(false);
+  const instructors = db.staff.filter((s) => s.active && (s.role === "instructor" || s.role === "admin"));
+  const [filterIds, setFilterIds] = useState(() => new Set(isAdmin ? instructors.map((i) => i.id) : [currentUser.id]));
+
+  const toggleFilter = (id) => {
+    setFilterIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.size === 0) return new Set(instructors.map((i) => i.id));
+      return next;
+    });
+  };
+  const selectAll = () => setFilterIds(new Set(instructors.map((i) => i.id)));
+  const allSelected = filterIds.size === instructors.length;
+
+  const thisMonday = getMonday(todayISO());
+  const nextMonday = addDays(thisMonday, 7);
+
+  const visibleClasses = db.classes.filter((c) => filterIds.has(c.instructorId));
+  const activeClass = db.classes.find((c) => c.id === activeClassId);
+
+  const addClass = (data) => { mutate((d) => { d.classes.push({ id: uid(), ...data, memberIds: [], waitlistIds: [] }); return d; }); setShowForm(false); setPrefill(null); };
+  const openQuickAdd = (weekStart) => (dayIdx, slot) => { setPrefill({ day: dayIdx, slot, weekStart }); setShowForm(true); };
+
+  const copyToNextWeek = () => {
+    const thisWeekClasses = db.classes.filter((c) => c.weekStart === thisMonday);
+    if (thisWeekClasses.length === 0) { window.alert("Bu hafta kopyalanacak ders bulunmuyor."); return; }
+    if (!window.confirm(`Bu haftadaki ${thisWeekClasses.length} ders, üye listeleri boş olarak gelecek haftaya kopyalanacak. Devam edilsin mi?`)) return;
+    mutate((d) => {
+      thisWeekClasses.forEach((c) => {
+        d.classes.push({ ...c, id: uid(), weekStart: nextMonday, memberIds: [], waitlistIds: [] });
+      });
+      logActivity(d, currentUser, `Bu haftanın programı gelecek haftaya kopyalandı (${thisWeekClasses.length} ders)`);
+      return d;
+    });
+  };
+
+  const downloadPdf = (weekStart, label) => {
+    const weekClasses = visibleClasses.filter((c) => c.weekStart === weekStart);
+    const docPdf = new jsPDF({ orientation: "landscape" });
+    docPdf.setFontSize(14);
+    docPdf.text(`${db.studio.name} - ${label} (${fmtDate(weekStart)} - ${fmtDate(addDays(weekStart, 5))})`, 14, 12);
+    const head = [["Saat", ...SCHEDULE_DAYS.map((i) => WEEKDAYS[i])]];
+    const body = TIME_SLOTS.map((slot) => {
+      const row = [slot];
+      SCHEDULE_DAYS.forEach((dayIdx) => {
+        const cellClasses = weekClasses.filter((c) => c.dayOfWeek === dayIdx && c.timeSlot === slot);
+        row.push(cellClasses.map((c) => {
+          const instr = db.staff.find((s) => s.id === c.instructorId);
+          const room = ROOMS.find((r) => r.id === c.roomId);
+          return `${c.title} (${room?.name || ""} · ${instr?.name || ""} · ${(c.memberIds || []).length}/${c.capacity})`;
+        }).join("\n") || "-");
+      });
+      return row;
+    });
+    autoTable(docPdf, { head, body, startY: 18, styles: { fontSize: 8, cellPadding: 2 }, headStyles: { fillColor: [32, 41, 31] } });
+    docPdf.save(`ders-programi-${weekStart}.pdf`);
+  };
+
+  const pastWeeks = [...new Set(db.classes.filter((c) => c.weekStart < thisMonday).map((c) => c.weekStart))].sort((a, b) => new Date(b) - new Date(a));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="font-display text-xl font-semibold">Ders Programı</h2>
+        {isAdmin && (
+          <button onClick={copyToNextWeek} className="text-xs font-semibold px-3 py-2 rounded-xl flex items-center gap-1.5" style={{ background: "#F5EDDA", color: "#A98330" }}>
+            <RefreshCcw size={14} /> Bu Haftayı Gelecek Haftaya Kopyala
+          </button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button onClick={selectAll} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: allSelected ? "#20291F" : "#F4F0E6", color: allSelected ? "#F4F0E6" : "#5B5340" }}>Tüm Hocalar</button>
+        {instructors.map((ins) => {
+          const active = filterIds.has(ins.id);
+          return (
+            <button key={ins.id} onClick={() => toggleFilter(ins.id)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background: active ? "#2F6F8F" : "#F4F0E6", color: active ? "#FCFAF4" : "#5B5340" }}>
+              {ins.name}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 -mt-1">
+        {ROOMS.map((r) => (
+          <span key={r.id} className="flex items-center gap-1.5 text-xs text-[#5B5340]">
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: ROOM_COLORS[r.id].solid }} />
+            {r.name}
+          </span>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-[#8B8168]">Boş bir hücreye dokunarak o haftaya ders ekleyebilirsin.</p>
+        <button onClick={() => downloadPdf(thisMonday, "Bu Hafta")} className="btn-teal px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5"><FileSpreadsheet size={13} /> Bu Haftayı PDF İndir</button>
+      </div>
+      <WeekGrid title="Bu Hafta" weekStart={thisMonday} isCurrentOrFuture={true} visibleClasses={visibleClasses} db={db} isAdmin={isAdmin} currentUser={currentUser} onOpenClass={setActiveClassId} onQuickAdd={openQuickAdd(thisMonday)} />
+
+      <div className="flex items-center justify-between mt-2">
+        <p className="text-xs text-[#8B8168]">Gelecek haftanın programını şimdiden hazırlayabilirsin.</p>
+        <button onClick={() => downloadPdf(nextMonday, "Gelecek Hafta")} className="btn-teal px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5"><FileSpreadsheet size={13} /> Gelecek Haftayı PDF İndir</button>
+      </div>
+      <WeekGrid title="Gelecek Hafta" weekStart={nextMonday} isCurrentOrFuture={true} visibleClasses={visibleClasses} db={db} isAdmin={isAdmin} currentUser={currentUser} onOpenClass={setActiveClassId} onQuickAdd={openQuickAdd(nextMonday)} />
+
+      {pastWeeks.length > 0 && (
+        <div className="flex flex-col gap-2 mt-2">
+          <button onClick={() => setShowArchive((v) => !v)} className="text-sm font-semibold text-[#5B5340] flex items-center gap-1.5 w-fit">
+            <ChevronDown size={16} style={{ transform: showArchive ? "rotate(180deg)" : "none" }} /> Geçmiş Haftalık Programlar ({pastWeeks.length})
+          </button>
+          {showArchive && pastWeeks.map((ws) => (
+            <WeekGrid key={ws} title="Geçmiş Program" weekStart={ws} isCurrentOrFuture={false} visibleClasses={visibleClasses} db={db} isAdmin={isAdmin} currentUser={currentUser} onOpenClass={setActiveClassId} onQuickAdd={() => {}} />
+          ))}
+        </div>
+      )}
+
+      {showForm && <ClassFormModal onClose={() => { setShowForm(false); setPrefill(null); }} onSave={addClass} instructors={instructors} initialDay={prefill?.day} initialSlot={prefill?.slot} weekStart={prefill?.weekStart} isAdmin={isAdmin} currentUser={currentUser} />}
       {activeClass && <ClassDetailModal cls={activeClass} db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} onClose={() => setActiveClassId(null)} />}
     </div>
   );
@@ -2183,7 +2390,7 @@ function PinChangeModal({ staffName, onClose, onSave }) {
 function computePunctuality(db, periodPrefix) {
   const instructors = db.staff.filter((s) => s.role === "instructor");
   return instructors.map((ins) => {
-    const checkins = db.checkins.filter((c) => c.staffId === ins.id && c.timestamp.startsWith(periodPrefix));
+    const checkins = db.checkins.filter((c) => c.staffId === ins.id && c.type !== "out" && c.timestamp.startsWith(periodPrefix));
     const byDate = {};
     checkins.forEach((c) => {
       const dstr = c.timestamp.slice(0, 10);
@@ -2194,7 +2401,7 @@ function computePunctuality(db, periodPrefix) {
     Object.entries(byDate).forEach(([dateStr, checkin]) => {
       const jsDay = new Date(dateStr + "T00:00:00").getDay();
       const ourIndex = (jsDay + 6) % 7;
-      const classesThatDay = db.classes.filter((c) => c.instructorId === ins.id && c.dayOfWeek === ourIndex).sort((a, b) => a.timeSlot.localeCompare(b.timeSlot));
+      const classesThatDay = db.classes.filter((c) => c.instructorId === ins.id && c.dayOfWeek === ourIndex && c.weekStart === getMonday(dateStr)).sort((a, b) => a.timeSlot.localeCompare(b.timeSlot));
       if (classesThatDay.length === 0) return;
       const firstClass = classesThatDay[0];
       const firstStart = firstClass.timeSlot.split("-")[0];
@@ -2530,7 +2737,10 @@ function StaffTab({ db, mutate, currentUser }) {
                 <div key={c.id} className="flex items-center justify-between text-sm border-b border-[#EFE8D5] pb-2 last:border-0">
                   <div>
                     <p className="font-medium">{s?.name || "Silinmiş personel"}</p>
-                    <p className="text-xs text-[#8B8168] font-mono">{fmtDateTime(c.timestamp)}</p>
+                    <p className="text-xs text-[#8B8168] font-mono flex items-center gap-1.5">
+                      <Badge color={c.type === "out" ? "#2F6F8F" : "#3E6B52"} bg={c.type === "out" ? "#E4EEF2" : "#E7F0EA"}>{c.type === "out" ? "Çıkış" : "Giriş"}</Badge>
+                      {fmtDateTime(c.timestamp)}
+                    </p>
                   </div>
                   <div className="text-right">
                     <Badge color={c.verified ? "#3E6B52" : "#B14A3A"} bg={c.verified ? "#E7F0EA" : "#F7E7E2"}>
@@ -2570,13 +2780,13 @@ function CheckinTab({ db, mutate, currentUser }) {
     setStatus("done");
   };
 
-  const doCheckin = () => {
+  const doCheckin = (type) => {
     setStatus("loading");
     setWarning("");
     if (!navigator.geolocation) {
       finish(
-        { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: null, lng: null, distance: null, verified: false },
-        "Bu cihaz konum servisini desteklemiyor, giriş konum doğrulanmadan kaydedildi."
+        { id: uid(), staffId: currentUser.id, type, timestamp: new Date().toISOString(), lat: null, lng: null, distance: null, verified: false },
+        "Bu cihaz konum servisini desteklemiyor, kayıt konum doğrulanmadan alındı."
       );
       return;
     }
@@ -2585,19 +2795,19 @@ function CheckinTab({ db, mutate, currentUser }) {
         const { latitude, longitude } = pos.coords;
         if (!studioSet) {
           finish(
-            { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: null, verified: false },
-            "Yönetici henüz stüdyo konumunu tanımlamadı, giriş konum doğrulanmadan kaydedildi."
+            { id: uid(), staffId: currentUser.id, type, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: null, verified: false },
+            "Yönetici henüz stüdyo konumunu tanımlamadı, kayıt konum doğrulanmadan alındı."
           );
           return;
         }
         const dist = distanceMeters(latitude, longitude, studio.lat, studio.lng);
         const verified = dist !== null && dist <= studio.radius;
-        finish({ id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: dist, verified });
+        finish({ id: uid(), staffId: currentUser.id, type, timestamp: new Date().toISOString(), lat: latitude, lng: longitude, distance: dist, verified });
       },
       (err) => {
         finish(
-          { id: uid(), staffId: currentUser.id, timestamp: new Date().toISOString(), lat: null, lng: null, distance: null, verified: false },
-          err.code === 1 ? "Konum izni verilmedi, giriş konum doğrulanmadan kaydedildi." : "Konum alınamadı, giriş konum doğrulanmadan kaydedildi."
+          { id: uid(), staffId: currentUser.id, type, timestamp: new Date().toISOString(), lat: null, lng: null, distance: null, verified: false },
+          err.code === 1 ? "Konum izni verilmedi, kayıt konum doğrulanmadan alındı." : "Konum alınamadı, kayıt konum doğrulanmadan alındı."
         );
       },
       { enableHighAccuracy: true, timeout: 12000 }
@@ -2606,7 +2816,7 @@ function CheckinTab({ db, mutate, currentUser }) {
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-display text-xl font-semibold">Giriş Yap</h2>
+      <h2 className="font-display text-xl font-semibold">Giriş / Çıkış</h2>
 
       <div className="card-surface rounded-2xl p-6 flex flex-col items-center text-center gap-4">
         <div className="w-16 h-16 rounded-2xl bg-[#20291F] flex items-center justify-center">
@@ -2614,11 +2824,16 @@ function CheckinTab({ db, mutate, currentUser }) {
         </div>
         <div>
           <p className="font-display text-lg font-semibold">{studio.name}</p>
-          <p className="text-sm text-[#8B8168]">Giriş yapmak için stüdyoda olman ve konum iznini açman gerekir.</p>
+          <p className="text-sm text-[#8B8168]">İşe gelirken "Giriş", öğle arası veya gün sonunda ayrılırken "Çıkış" yap.</p>
         </div>
-        <button onClick={doCheckin} disabled={status === "loading"} className="btn-clay w-full py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-60">
-          {status === "loading" ? <><Loader2 size={18} className="animate-spin" /> Konum doğrulanıyor...</> : <><MapPin size={18} /> Konumumu Doğrula ve Giriş Yap</>}
-        </button>
+        <div className="flex gap-2 w-full">
+          <button onClick={() => doCheckin("in")} disabled={status === "loading"} className="btn-clay flex-1 py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-60">
+            {status === "loading" ? <Loader2 size={18} className="animate-spin" /> : <><MapPin size={18} /> Giriş Yap</>}
+          </button>
+          <button onClick={() => doCheckin("out")} disabled={status === "loading"} className="btn-teal flex-1 py-3.5 rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-60">
+            {status === "loading" ? <Loader2 size={18} className="animate-spin" /> : <><LogOut size={18} /> Çıkış Yap</>}
+          </button>
+        </div>
 
         {status === "done" && lastResult && (
           <div className={`w-full text-sm rounded-xl p-3 flex items-start gap-2 text-left ${lastResult.verified ? "bg-[#E7F0EA] text-[#3E6B52]" : "bg-[#F5EDDA] text-[#A98330]"}`}>
@@ -2627,20 +2842,23 @@ function CheckinTab({ db, mutate, currentUser }) {
               {warning
                 ? warning
                 : lastResult.verified
-                  ? `Giriş kaydedildi — stüdyo konumundan ${Math.round(lastResult.distance)} m mesafedesin.`
-                  : `Giriş kaydedildi ancak stüdyodan ${Math.round(lastResult.distance)} m uzaktasın, konum doğrulanamadı.`}
+                  ? `${lastResult.type === "out" ? "Çıkış" : "Giriş"} kaydedildi — stüdyo konumundan ${Math.round(lastResult.distance)} m mesafedesin.`
+                  : `${lastResult.type === "out" ? "Çıkış" : "Giriş"} kaydedildi ancak stüdyodan ${Math.round(lastResult.distance)} m uzaktasın, konum doğrulanamadı.`}
             </span>
           </div>
         )}
       </div>
 
       <div className="card-surface rounded-2xl p-4">
-        <p className="text-sm font-semibold mb-3">Geçmiş Girişlerim</p>
-        {myCheckins.length === 0 ? <p className="text-sm text-[#8B8168]">Henüz giriş kaydın yok.</p> : (
+        <p className="text-sm font-semibold mb-3">Geçmiş Kayıtlarım</p>
+        {myCheckins.length === 0 ? <p className="text-sm text-[#8B8168]">Henüz kaydın yok.</p> : (
           <div className="flex flex-col gap-2">
             {myCheckins.map((c) => (
               <div key={c.id} className="flex items-center justify-between text-sm">
-                <span className="font-mono text-xs">{fmtDateTime(c.timestamp)}</span>
+                <span className="flex items-center gap-2">
+                  <Badge color={c.type === "out" ? "#2F6F8F" : "#3E6B52"} bg={c.type === "out" ? "#E4EEF2" : "#E7F0EA"}>{c.type === "out" ? "Çıkış" : "Giriş"}</Badge>
+                  <span className="font-mono text-xs">{fmtDateTime(c.timestamp)}</span>
+                </span>
                 <Badge color={c.verified ? "#3E6B52" : "#B14A3A"} bg={c.verified ? "#E7F0EA" : "#F7E7E2"}>{c.verified ? "Doğrulandı" : "Uyumsuz"}</Badge>
               </div>
             ))}
@@ -2650,9 +2868,6 @@ function CheckinTab({ db, mutate, currentUser }) {
     </div>
   );
 }
-
-/* ============================= RAPORLAR (ADMIN) ============================= */
-
 function ReportsTab({ db }) {
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
 
@@ -2870,6 +3085,7 @@ const ADMIN_TABS = [
   { id: "members", label: "Üyeler", icon: Users },
   { id: "packages", label: "Paketler", icon: CreditCard },
   { id: "attendance", label: "Yoklama", icon: CalendarCheck },
+  { id: "makeups", label: "Telafiler", icon: RefreshCcw },
   { id: "schedule", label: "Ders Programı", icon: CalendarDays },
   { id: "finance", label: "Muhasebe", icon: Wallet },
   { id: "staff", label: "Personel", icon: ShieldCheck },
@@ -2880,6 +3096,7 @@ const INSTRUCTOR_TABS = [
   { id: "overview", label: "Genel Bakış", icon: Home },
   { id: "members", label: "Üyeler", icon: Users },
   { id: "attendance", label: "Yoklama", icon: CalendarCheck },
+  { id: "makeups", label: "Telafiler", icon: RefreshCcw },
   { id: "schedule", label: "Programım", icon: CalendarDays },
   { id: "checkin", label: "Giriş Yap", icon: MapPin },
 ];
@@ -3055,6 +3272,7 @@ export default function App() {
         {visibleTab === "members" && <MembersTab db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} />}
         {visibleTab === "packages" && isAdmin && <PackagesTab db={db} />}
         {visibleTab === "attendance" && <AttendanceTab db={db} mutate={mutate} currentUser={currentUser} isAdmin={isAdmin} />}
+        {visibleTab === "makeups" && <MakeupsTab db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} />}
         {visibleTab === "schedule" && <ScheduleTab db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} />}
         {visibleTab === "finance" && isAdmin && <FinanceTab db={db} mutate={mutate} currentUser={currentUser} />}
         {visibleTab === "staff" && isAdmin && <StaffTab db={db} mutate={mutate} currentUser={currentUser} />}
